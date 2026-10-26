@@ -13,12 +13,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Refresh
@@ -29,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.*
@@ -40,7 +40,7 @@ import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
 
-// 1. 陌生開發名單資料結構
+// 1. 陌生開發名單資料結構 (維持不變)
 data class Prospect(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
@@ -50,18 +50,24 @@ data class Prospect(
     val updatedAt: Long = System.currentTimeMillis()
 )
 
-// 2. 客戶訂貨需求資料結構
+// 2. 單筆訂貨記錄對話框 (支援完成狀態與時間排序)
+data class OrderRecord(
+    val id: String = UUID.randomUUID().toString(),
+    val details: String,
+    val isCompleted: Boolean = false,
+    val createdBy: String = "我",
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+// 3. 客戶訂貨主檔 (每位客戶可包含多筆不同時間的訂貨對話框)
 data class CustomerOrder(
     val id: String = UUID.randomUUID().toString(),
     val customerName: String,
     val customerNumber: String,
-    val category: String,
-    val details: String = "",
+    val records: List<OrderRecord> = emptyList(),
     val lastEditor: String = "我",
     val updatedAt: Long = System.currentTimeMillis()
 )
-
-val PRODUCT_CATEGORIES = listOf("紐崔萊", "雅姿", "家用科技", "家潔產品", "其它");
 
 object StorageAndCloudManager {
     private const val PREF = "prospect_tracker_prefs";
@@ -108,18 +114,32 @@ object StorageAndCloudManager {
     }
 
     // --- 客戶訂貨本地存取 ---
+    fun serializeOrderObj(item: CustomerOrder): JSONObject {
+        val o = JSONObject();
+        o.put("id", item.id);
+        o.put("customerName", item.customerName);
+        o.put("customerNumber", item.customerNumber);
+        o.put("lastEditor", item.lastEditor);
+        o.put("updatedAt", item.updatedAt);
+        val recArr = JSONArray();
+        // 確保由新到舊排列儲存
+        for (r in item.records.sortedByDescending { it.timestamp }) {
+            val ro = JSONObject();
+            ro.put("id", r.id);
+            ro.put("details", r.details);
+            ro.put("isCompleted", r.isCompleted);
+            ro.put("createdBy", r.createdBy);
+            ro.put("timestamp", r.timestamp);
+            recArr.put(ro);
+        }
+        o.put("records", recArr);
+        return o;
+    }
+
     fun saveOrdersLocal(ctx: Context, list: List<CustomerOrder>) {
         val arr = JSONArray();
         for (item in list) {
-            val o = JSONObject();
-            o.put("id", item.id);
-            o.put("customerName", item.customerName);
-            o.put("customerNumber", item.customerNumber);
-            o.put("category", item.category);
-            o.put("details", item.details);
-            o.put("lastEditor", item.lastEditor);
-            o.put("updatedAt", item.updatedAt);
-            arr.put(o);
+            arr.put(serializeOrderObj(item));
         }
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(KEY_ORDERS, arr.toString()).apply();
     }
@@ -195,18 +215,47 @@ object StorageAndCloudManager {
     }
 
     private fun parseOrderObj(o: JSONObject): CustomerOrder {
+        val recs = mutableListOf<OrderRecord>();
+        val recArr = o.optJSONArray("records");
+        if (recArr != null) {
+            for (i in 0 until recArr.length()) {
+                val ro = recArr.optJSONObject(i);
+                if (ro != null) {
+                    recs.add(
+                        OrderRecord(
+                            id = ro.optString("id", UUID.randomUUID().toString()),
+                            details = ro.optString("details", ""),
+                            isCompleted = ro.optBoolean("isCompleted", false),
+                            createdBy = ro.optString("createdBy", "夥伴"),
+                            timestamp = ro.optLong("timestamp", System.currentTimeMillis())
+                        )
+                    );
+                }
+            }
+        } else {
+            // 相容舊版單筆詳細資料格式自動升級
+            val legacyDetails = o.optString("details", "");
+            if (legacyDetails.isNotBlank()) {
+                recs.add(
+                    OrderRecord(
+                        details = legacyDetails,
+                        isCompleted = false,
+                        createdBy = o.optString("lastEditor", "夥伴"),
+                        timestamp = o.optLong("updatedAt", System.currentTimeMillis())
+                    )
+                );
+            }
+        }
         return CustomerOrder(
             id = o.optString("id", UUID.randomUUID().toString()),
             customerName = o.optString("customerName", "未命名"),
             customerNumber = o.optString("customerNumber", "無編號"),
-            category = o.optString("category", "紐崔萊"),
-            details = o.optString("details", ""),
+            records = recs.sortedByDescending { it.timestamp },
             lastEditor = o.optString("lastEditor", "夥伴"),
             updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
         );
     }
 
-    // 打包完整備份檔 (同時包含陌生開發與客戶訂貨)
     fun createBackupJson(prospects: List<Prospect>, orders: List<CustomerOrder>): String {
         val root = JSONObject();
         val pArr = JSONArray();
@@ -222,15 +271,7 @@ object StorageAndCloudManager {
         }
         val oArr = JSONArray();
         for (item in orders) {
-            val o = JSONObject();
-            o.put("id", item.id);
-            o.put("customerName", item.customerName);
-            o.put("customerNumber", item.customerNumber);
-            o.put("category", item.category);
-            o.put("details", item.details);
-            o.put("lastEditor", item.lastEditor);
-            o.put("updatedAt", item.updatedAt);
-            oArr.put(o);
+            oArr.put(serializeOrderObj(item));
         }
         root.put("backupTime", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date()));
         root.put("prospects", pArr);
@@ -311,15 +352,7 @@ object StorageAndCloudManager {
                 connectTimeout = 5000;
                 readTimeout = 5000;
             };
-            val o = JSONObject().apply {
-                put("id", item.id);
-                put("customerName", item.customerName);
-                put("customerNumber", item.customerNumber);
-                put("category", item.category);
-                put("details", item.details);
-                put("lastEditor", item.lastEditor);
-                put("updatedAt", item.updatedAt);
-            };
+            val o = serializeOrderObj(item);
             OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(o.toString()); };
             val code = conn.responseCode;
             conn.disconnect();
@@ -379,7 +412,6 @@ fun MainAppEntry() {
     val ctx = LocalContext.current;
     val scope = rememberCoroutineScope();
 
-    // 載入陌生開發名單
     val prospects = remember {
         val saved = StorageAndCloudManager.loadLocal(ctx);
         if (saved.isNotEmpty()) mutableStateListOf(*saved.toTypedArray())
@@ -393,35 +425,45 @@ fun MainAppEntry() {
         )
     };
 
-    // 載入客戶訂貨名單
     val orders = remember {
         val saved = StorageAndCloudManager.loadOrdersLocal(ctx);
         if (saved.isNotEmpty()) mutableStateListOf(*saved.toTypedArray())
         else mutableStateListOf(
             CustomerOrder(
-                customerName = "陳小姐 (範例訂貨)",
+                customerName = "陳小姐 (範例客戶)",
                 customerNumber = "A123456",
-                category = "紐崔萊",
-                details = "雙X 2盒、優質蛋白素 1罐，下週三面交。",
+                records = listOf(
+                    OrderRecord(
+                        details = "優質蛋白素 2罐、雙X 1盒，約下週三面交。",
+                        isCompleted = false,
+                        createdBy = "業務A",
+                        timestamp = System.currentTimeMillis()
+                    ),
+                    OrderRecord(
+                        details = "洗碗精 2瓶、LOC 1瓶 (已交貨付款)。",
+                        isCompleted = true,
+                        createdBy = "業務A",
+                        timestamp = System.currentTimeMillis() - 86400000L
+                    )
+                ),
                 lastEditor = "業務A"
             )
         )
     };
 
-    // 頁面狀態："home" (首頁選擇), "prospects" (陌生開發), "orders" (客戶訂貨)
     var currentSection by remember { mutableStateOf("home") };
     var selectedProspectId by remember { mutableStateOf<String?>(null) };
     var selectedOrderId by remember { mutableStateOf<String?>(null) };
 
     var showAddProspectDialog by remember { mutableStateOf(false) };
-    var showAddOrderDialog by remember { mutableStateOf(false) };
+    var showAddCustomerDialog by remember { mutableStateOf(false) };
     var showCloudDialog by remember { mutableStateOf(false) };
 
     var cloudUrl by remember { mutableStateOf(StorageAndCloudManager.getCloudUrl(ctx)) };
     var userName by remember { mutableStateOf(StorageAndCloudManager.getUserName(ctx)) };
     var syncStatus by remember { mutableStateOf("本地儲存模式") };
 
-    // 每 4 秒自動與雲端同步「陌生開發」與「客戶訂貨」
+    // 每 4 秒自動與雲端同步
     LaunchedEffect(cloudUrl) {
         while (isActive) {
             if (cloudUrl.isNotBlank()) {
@@ -455,20 +497,18 @@ fun MainAppEntry() {
         }
     }
 
-    // 匯出 JSON 備份檔至 Google Drive
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
             try {
                 val json = StorageAndCloudManager.createBackupJson(prospects, orders);
                 ctx.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray(Charsets.UTF_8)); };
-                Toast.makeText(ctx, "☁️ 陌生開發與客戶訂貨已完整備份至雲端硬碟！", Toast.LENGTH_LONG).show();
+                Toast.makeText(ctx, "☁️ 完整資料已備份至雲端硬碟！", Toast.LENGTH_LONG).show();
             } catch (e: Exception) {
                 Toast.makeText(ctx, "備份失敗：${e.message}", Toast.LENGTH_LONG).show();
             }
         }
     };
 
-    // 從 Google Drive 讀取 JSON 備份檔還原
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             try {
@@ -492,7 +532,7 @@ fun MainAppEntry() {
                         scope.launch { for (o in restoredOrders) StorageAndCloudManager.pushOrderToCloud(cloudUrl, o); }
                     }
                 }
-                Toast.makeText(ctx, "✅ 成功還原：${restoredProspects.size} 筆開發名單、${restoredOrders.size} 筆訂貨紀錄！", Toast.LENGTH_LONG).show();
+                Toast.makeText(ctx, "✅ 成功還原：${restoredProspects.size} 筆開發名單、${restoredOrders.size} 位客戶訂貨紀錄！", Toast.LENGTH_LONG).show();
             } catch (e: Exception) {
                 Toast.makeText(ctx, "讀取失敗：${e.message}", Toast.LENGTH_LONG).show();
             }
@@ -502,7 +542,6 @@ fun MainAppEntry() {
     val currentProspect = prospects.find { it.id == selectedProspectId };
     val currentOrder = orders.find { it.id == selectedOrderId };
 
-    // 畫面導覽判斷
     if (currentProspect != null) {
         BackHandler { selectedProspectId = null; }
         ProspectDetailScreen(
@@ -530,11 +569,11 @@ fun MainAppEntry() {
         );
     } else if (currentOrder != null) {
         BackHandler { selectedOrderId = null; }
-        OrderDetailScreen(
+        CustomerOrderTimelineScreen(
             order = currentOrder,
             currentUserName = userName,
             onBack = { selectedOrderId = null; },
-            onSave = { updated ->
+            onUpdateOrder = { updated ->
                 val idx = orders.indexOfFirst { it.id == updated.id };
                 if (idx >= 0) orders[idx] = updated else orders.add(0, updated);
                 orders.sortByDescending { it.updatedAt };
@@ -542,9 +581,8 @@ fun MainAppEntry() {
                 if (cloudUrl.isNotBlank()) {
                     scope.launch { StorageAndCloudManager.pushOrderToCloud(cloudUrl, updated); }
                 }
-                Toast.makeText(ctx, "✅ 訂貨資料已儲存並同步", Toast.LENGTH_SHORT).show();
             },
-            onDelete = { id ->
+            onDeleteCustomer = { id ->
                 orders.removeAll { it.id == id };
                 StorageAndCloudManager.saveOrdersLocal(ctx, orders);
                 selectedOrderId = null;
@@ -554,7 +592,6 @@ fun MainAppEntry() {
             }
         );
     } else if (currentSection == "home") {
-        // 進入 Application 後的首頁功能選擇畫面
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -587,7 +624,6 @@ fun MainAppEntry() {
                 Text("目前登入身分：$userName", fontSize = 14.sp, color = Color.Gray)
                 Spacer(modifier = Modifier.height(32.dp))
 
-                // 選項 1：陌生開發名單
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -609,7 +645,7 @@ fun MainAppEntry() {
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // 選項 2：現有客戶訂貨需求
+                val pendingCount = orders.sumOf { c -> c.records.count { !it.isCompleted } };
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -625,13 +661,12 @@ fun MainAppEntry() {
                     ) {
                         Text("🛒 客戶訂貨需求", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("記錄客戶姓名、編號、5大產品分類與訂貨明細 (目前 ${orders.size} 筆)", fontSize = 14.sp, color = Color(0xFFB2DFDB))
+                        Text("共 ${orders.size} 位客戶｜⏳ 待處理訂單：$pendingCount 筆", fontSize = 14.sp, color = Color(0xFFB2DFDB))
                     }
                 }
             }
         }
     } else if (currentSection == "prospects") {
-        // 陌生開發名單列表頁 (維持原本設計)
         BackHandler { currentSection = "home"; }
         Scaffold(
             topBar = {
@@ -718,14 +753,14 @@ fun MainAppEntry() {
             }
         }
     } else if (currentSection == "orders") {
-        // 現有客戶訂貨需求列表頁
+        // 客戶訂貨列表頁：點選同一位客戶進入時間軸對話框
         BackHandler { currentSection = "home"; }
         Scaffold(
             topBar = {
                 TopAppBar(
                     title = {
                         Column {
-                            Text("客戶訂貨需求 (${orders.size})", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Text("客戶訂貨名單 (${orders.size})", fontWeight = FontWeight.Bold, fontSize = 18.sp)
                             Text(syncStatus, fontSize = 11.sp, color = Color(0xFFB2DFDB))
                         }
                     },
@@ -759,54 +794,67 @@ fun MainAppEntry() {
             },
             floatingActionButton = {
                 ExtendedFloatingActionButton(
-                    onClick = { showAddOrderDialog = true },
+                    onClick = { showAddCustomerDialog = true },
                     containerColor = Color(0xFF00796B),
                     contentColor = Color.White
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "新增訂貨")
+                    Icon(Icons.Default.Add, contentDescription = "新增客戶")
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("新增客戶訂貨", fontWeight = FontWeight.Bold)
+                    Text("新增訂貨客戶", fontWeight = FontWeight.Bold)
                 }
             }
         ) { innerPadding ->
             if (orders.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize().padding(innerPadding), contentAlignment = Alignment.Center) {
-                    Text("目前尚無訂貨紀錄，請點右下角「＋新增客戶訂貨」", color = Color.Gray, fontSize = 15.sp)
+                    Text("目前尚無客戶訂貨紀錄，請點右下角「＋新增訂貨客戶」", color = Color.Gray, fontSize = 15.sp)
                 }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize().background(Color(0xFFF4F6F9)).padding(innerPadding).padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items(orders, key = { it.id }) { order ->
+                    items(orders, key = { it.id }) { customer ->
+                        val sortedRecs = customer.records.sortedByDescending { it.timestamp };
+                        val pendingCount = sortedRecs.count { !it.isCompleted };
+                        val completedCount = sortedRecs.count { it.isCompleted };
+                        val latestRec = sortedRecs.firstOrNull();
+
                         Card(
-                            modifier = Modifier.fillMaxWidth().clickable { selectedOrderId = order.id },
+                            modifier = Modifier.fillMaxWidth().clickable { selectedOrderId = customer.id },
                             shape = RoundedCornerShape(12.dp),
                             colors = CardDefaults.cardColors(containerColor = Color.White),
                             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                    Text("${order.customerName} (#${order.customerNumber})", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF00796B))
-                                    val timeStr = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(order.updatedAt));
-                                    Text("更新：$timeStr (${order.lastEditor})", fontSize = 11.sp, color = Color.Gray)
+                                    Text("${customer.customerName} (#${customer.customerNumber})", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF00796B))
+                                    Surface(
+                                        color = if (pendingCount > 0) Color(0xFFFFF3E0) else Color(0xFFE8F5E9),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        val badgeText = if (pendingCount > 0) "⏳ 待處理 $pendingCount 筆" else "✅ 全部完成 ($completedCount)";
+                                        val badgeColor = if (pendingCount > 0) Color(0xFFE65100) else Color(0xFF2E7D32);
+                                        Text(
+                                            text = badgeText,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = badgeColor,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
                                 }
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Surface(
-                                    color = Color(0xFFE0F2F1),
-                                    shape = RoundedCornerShape(6.dp)
-                                ) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                if (latestRec != null) {
+                                    val recTime = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(latestRec.timestamp));
+                                    val statusIcon = if (latestRec.isCompleted) "✅" else "⏳";
                                     Text(
-                                        text = "🏷️ 產品分類：${order.category}",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF00695C),
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        text = "$statusIcon 最新 ($recTime)：${latestRec.details}",
+                                        fontSize = 14.sp,
+                                        color = Color(0xFF444444),
+                                        maxLines = 2
                                     )
-                                }
-                                if (order.details.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Text("📝 詳細資料：${order.details}", fontSize = 14.sp, color = Color(0xFF444444), maxLines = 2)
+                                } else {
+                                    Text("尚無訂貨明細，點此進入新增第一筆訂貨", fontSize = 13.sp, color = Color.Gray)
                                 }
                             }
                         }
@@ -861,21 +909,17 @@ fun MainAppEntry() {
         )
     }
 
-    // 新增客戶訂貨需求彈窗
-    if (showAddOrderDialog) {
+    // 新增訂貨客戶彈窗 (已移除產品分類，可直接輸入第一筆訂貨詳細資料)
+    if (showAddCustomerDialog) {
         var cName by remember { mutableStateOf("") };
         var cNum by remember { mutableStateOf("") };
-        var selectedCat by remember { mutableStateOf(PRODUCT_CATEGORIES[0]) };
-        var cDetails by remember { mutableStateOf("") };
+        var firstOrderDetails by remember { mutableStateOf("") };
 
         AlertDialog(
-            onDismissRequest = { showAddOrderDialog = false },
-            title = { Text("新增客戶訂貨需求", fontWeight = FontWeight.Bold) },
+            onDismissRequest = { showAddCustomerDialog = false },
+            title = { Text("新增訂貨客戶", fontWeight = FontWeight.Bold) },
             text = {
-                Column(
-                    modifier = Modifier.verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(
                         value = cName,
                         onValueChange = { cName = it },
@@ -890,29 +934,12 @@ fun MainAppEntry() {
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text("選擇產品分類：", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Color(0xFF00796B))
-                    PRODUCT_CATEGORIES.forEach { cat ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { selectedCat = cat }
-                                .padding(vertical = 2.dp)
-                        ) {
-                            RadioButton(
-                                selected = (selectedCat == cat),
-                                onClick = { selectedCat = cat }
-                            )
-                            Text(text = cat, fontSize = 15.sp)
-                        }
-                    }
                     OutlinedTextField(
-                        value = cDetails,
-                        onValueChange = { cDetails = it },
-                        label = { Text("詳細資料 (訂貨品項、數量、備註)") },
+                        value = firstOrderDetails,
+                        onValueChange = { firstOrderDetails = it },
+                        label = { Text("本次訂貨詳細資料 (選填，進入後可隨時新增)") },
                         modifier = Modifier.fillMaxWidth().height(110.dp),
-                        maxLines = 6
+                        maxLines = 5
                     )
                 }
             },
@@ -920,28 +947,41 @@ fun MainAppEntry() {
                 Button(
                     onClick = {
                         if (cName.isNotBlank()) {
+                            val initRecords = if (firstOrderDetails.isNotBlank()) {
+                                listOf(
+                                    OrderRecord(
+                                        details = firstOrderDetails.trim(),
+                                        isCompleted = false,
+                                        createdBy = userName,
+                                        timestamp = System.currentTimeMillis()
+                                    )
+                                )
+                            } else emptyList();
+
                             val created = CustomerOrder(
                                 customerName = cName.trim(),
                                 customerNumber = cNum.trim().ifEmpty { "無編號" },
-                                category = selectedCat,
-                                details = cDetails.trim(),
-                                lastEditor = userName
+                                records = initRecords,
+                                lastEditor = userName,
+                                updatedAt = System.currentTimeMillis()
                             );
                             orders.add(0, created);
                             StorageAndCloudManager.saveOrdersLocal(ctx, orders);
                             if (cloudUrl.isNotBlank()) {
                                 scope.launch { StorageAndCloudManager.pushOrderToCloud(cloudUrl, created); }
                             }
-                            showAddOrderDialog = false;
+                            showAddCustomerDialog = false;
+                            // 建立後直接進入該客戶的訂貨對話框頁面
+                            selectedOrderId = created.id;
                         } else {
                             Toast.makeText(ctx, "請輸入客戶姓名", Toast.LENGTH_SHORT).show();
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00796B))
-                ) { Text("新增並備份") }
+                ) { Text("新增並進入客戶頁") }
             },
             dismissButton = {
-                TextButton(onClick = { showAddOrderDialog = false }) { Text("取消") }
+                TextButton(onClick = { showAddCustomerDialog = false }) { Text("取消") }
             }
         )
     }
@@ -1150,34 +1190,53 @@ fun ProspectDetailScreen(
     }
 }
 
-// 客戶訂貨需求詳細內容與編輯頁
+// 客戶訂貨歷史對話框頁面 (每次點選客戶可新增一筆詳細資料對話框，由新到舊排列，並可一鍵標記完成狀態)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun OrderDetailScreen(
+fun CustomerOrderTimelineScreen(
     order: CustomerOrder,
     currentUserName: String,
     onBack: () -> Unit,
-    onSave: (CustomerOrder) -> Unit,
-    onDelete: (String) -> Unit
+    onUpdateOrder: (CustomerOrder) -> Unit,
+    onDeleteCustomer: (String) -> Unit
 ) {
-    var customerName by remember(order.id) { mutableStateOf(order.customerName) };
-    var customerNumber by remember(order.id) { mutableStateOf(order.customerNumber) };
-    var category by remember(order.id, order.updatedAt) { mutableStateOf(order.category) };
-    var details by remember(order.id, order.updatedAt) { mutableStateOf(order.details) };
-    var showDeleteConfirm by remember { mutableStateOf(false) };
+    val ctx = LocalContext.current;
+    var customerName by remember(order.id, order.updatedAt) { mutableStateOf(order.customerName) };
+    var customerNumber by remember(order.id, order.updatedAt) { mutableStateOf(order.customerNumber) };
+    var newOrderText by remember { mutableStateOf("") };
+    var editingRecord by remember { mutableStateOf<OrderRecord?>(null) };
+    var showDeleteCustomerConfirm by remember { mutableStateOf(false) };
+
+    // 確保訂單對話框永遠由新到舊排列
+    val sortedRecords = remember(order.records) {
+        order.records.sortedByDescending { it.timestamp }
+    };
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("客戶訂貨詳細資料", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
+                title = { Text("${order.customerName} 的訂貨紀錄", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = {
+                        // 返回前自動保存姓名或編號修改
+                        if (customerName.trim() != order.customerName || customerNumber.trim() != order.customerNumber) {
+                            onUpdateOrder(
+                                order.copy(
+                                    customerName = customerName.trim().ifEmpty { "未命名" },
+                                    customerNumber = customerNumber.trim().ifEmpty { "無編號" },
+                                    lastEditor = currentUserName,
+                                    updatedAt = System.currentTimeMillis()
+                                )
+                            );
+                        }
+                        onBack();
+                    }) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = Color.White)
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showDeleteConfirm = true }) {
-                        Icon(Icons.Default.Delete, contentDescription = "刪除", tint = Color(0xFFFFB4AB))
+                    IconButton(onClick = { showDeleteCustomerConfirm = true }) {
+                        Icon(Icons.Default.Delete, contentDescription = "刪除客戶", tint = Color(0xFFFFB4AB))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF00796B), titleContentColor = Color.White)
@@ -1187,111 +1246,334 @@ fun OrderDetailScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .background(Color(0xFFF4F6F9))
                 .padding(innerPadding)
-                .padding(16.dp),
+                .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(
-                    value = customerName,
-                    onValueChange = { customerName = it },
-                    label = { Text("客戶姓名") },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = customerNumber,
-                    onValueChange = { customerNumber = it },
-                    label = { Text("客戶編號") },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true
-                )
-            }
-
-            Text("產品分類（點選切換）：", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF00796B))
-
-            // 5種產品分類選擇按鈕列
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    PRODUCT_CATEGORIES.take(3).forEach { cat ->
-                        val isSelected = (category == cat);
-                        Button(
-                            onClick = { category = cat },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isSelected) Color(0xFF00796B) else Color(0xFFE0E0E0),
-                                contentColor = if (isSelected) Color.White else Color.Black
-                            ),
-                            contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp)
-                        ) {
-                            Text(cat, fontSize = 13.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal)
-                        }
-                    }
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    PRODUCT_CATEGORIES.drop(3).forEach { cat ->
-                        val isSelected = (category == cat);
-                        Button(
-                            onClick = { category = cat },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isSelected) Color(0xFF00796B) else Color(0xFFE0E0E0),
-                                contentColor = if (isSelected) Color.White else Color.Black
-                            ),
-                            contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp)
-                        ) {
-                            Text(cat, fontSize = 13.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal)
-                        }
-                    }
-                    Spacer(modifier = Modifier.weight(1f))
-                }
-            }
-
-            OutlinedTextField(
-                value = details,
-                onValueChange = { details = it },
-                label = { Text("詳細資料 (訂貨品項、數量、交貨狀況等文字方塊)") },
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                maxLines = Int.MAX_VALUE
-            )
-
-            Button(
-                onClick = {
-                    val updated = order.copy(
-                        customerName = customerName.trim().ifEmpty { "未命名" },
-                        customerNumber = customerNumber.trim().ifEmpty { "無編號" },
-                        category = category,
-                        details = details,
-                        lastEditor = currentUserName,
-                        updatedAt = System.currentTimeMillis()
-                    );
-                    onSave(updated);
-                    onBack();
-                },
-                modifier = Modifier.fillMaxWidth().height(50.dp),
+            // 1. 客戶基本資料列 (姓名與編號)
+            Card(
                 shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00796B))
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
             ) {
-                Text("💾 儲存訂貨資料並同步至雲端", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = customerName,
+                        onValueChange = { customerName = it },
+                        label = { Text("客戶姓名") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = customerNumber,
+                        onValueChange = { customerNumber = it },
+                        label = { Text("客戶編號") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true
+                    )
+                    Button(
+                        onClick = {
+                            onUpdateOrder(
+                                order.copy(
+                                    customerName = customerName.trim().ifEmpty { "未命名" },
+                                    customerNumber = customerNumber.trim().ifEmpty { "無編號" },
+                                    lastEditor = currentUserName,
+                                    updatedAt = System.currentTimeMillis()
+                                )
+                            );
+                            Toast.makeText(ctx, "✅ 已更新客戶基本資料", Toast.LENGTH_SHORT).show();
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00796B)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp)
+                    ) {
+                        Text("保存", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            // 2. 新增一筆詳細資料對話框輸入區
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFE0F2F1)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                    Text(
+                        text = "➕ 新增本次訂貨詳細資料（送出後自動排在最上方）：",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF00695C)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = newOrderText,
+                            onValueChange = { newOrderText = it },
+                            placeholder = { Text("輸入本次訂貨品項、數量、交貨備註...") },
+                            modifier = Modifier.weight(1f),
+                            maxLines = 4,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedContainerColor = Color.White,
+                                unfocusedContainerColor = Color.White
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                if (newOrderText.isNotBlank()) {
+                                    val newRec = OrderRecord(
+                                        details = newOrderText.trim(),
+                                        isCompleted = false,
+                                        createdBy = currentUserName,
+                                        timestamp = System.currentTimeMillis()
+                                    );
+                                    val updatedList = listOf(newRec) + order.records;
+                                    val updatedOrder = order.copy(
+                                        customerName = customerName.trim().ifEmpty { "未命名" },
+                                        customerNumber = customerNumber.trim().ifEmpty { "無編號" },
+                                        records = updatedList.sortedByDescending { it.timestamp },
+                                        lastEditor = currentUserName,
+                                        updatedAt = System.currentTimeMillis()
+                                    );
+                                    newOrderText = "";
+                                    onUpdateOrder(updatedOrder);
+                                    Toast.makeText(ctx, "✅ 已新增訂貨紀錄並同步雲端", Toast.LENGTH_SHORT).show();
+                                } else {
+                                    Toast.makeText(ctx, "請先輸入訂貨詳細資料", Toast.LENGTH_SHORT).show();
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00796B)),
+                            modifier = Modifier.height(54.dp)
+                        ) {
+                            Text("新增\n訂單", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+
+            // 3. 歷史訂貨對話框列表標題
+            val pendingCount = sortedRecords.count { !it.isCompleted };
+            val doneCount = sortedRecords.count { it.isCompleted };
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "📋 歷次訂貨對話框 (由新到舊，共 ${sortedRecords.size} 筆)",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = Color(0xFF333333)
+                )
+                Text(
+                    text = "⏳待處理 $pendingCount ｜ ✅已完成 $doneCount",
+                    fontSize = 12.sp,
+                    color = Color(0xFF00796B),
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            // 4. 由新到舊排列的訂貨對話框卡片
+            if (sortedRecords.isEmpty()) {
+                Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text("目前尚無訂貨紀錄，請由上方輸入框新增第一筆訂單！", color = Color.Gray, fontSize = 14.sp)
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(sortedRecords, key = { it.id }) { rec ->
+                        val dateStr = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault()).format(Date(rec.timestamp));
+                        val cardBg = if (rec.isCompleted) Color(0xFFE8F5E9) else Color.White;
+
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { editingRecord = rec },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = cardBg),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(
+                                            checked = rec.isCompleted,
+                                            onCheckedChange = { checked ->
+                                                val updatedRecs = order.records.map {
+                                                    if (it.id == rec.id) it.copy(isCompleted = checked) else it
+                                                };
+                                                onUpdateOrder(
+                                                    order.copy(
+                                                        records = updatedRecs,
+                                                        lastEditor = currentUserName,
+                                                        updatedAt = System.currentTimeMillis()
+                                                    )
+                                                );
+                                            },
+                                            colors = CheckboxDefaults.colors(checkedColor = Color(0xFF2E7D32))
+                                        )
+                                        Column {
+                                            Text(
+                                                text = "🕒 $dateStr",
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF1E3A5F)
+                                            )
+                                            Text(
+                                                text = "紀錄人：${rec.createdBy} (點卡片可編輯內容)",
+                                                fontSize = 11.sp,
+                                                color = Color.Gray
+                                            )
+                                        }
+                                    }
+
+                                    // 一鍵切換完成狀態按鈕
+                                    Button(
+                                        onClick = {
+                                            val newState = !rec.isCompleted;
+                                            val updatedRecs = order.records.map {
+                                                if (it.id == rec.id) it.copy(isCompleted = newState) else it
+                                            };
+                                            onUpdateOrder(
+                                                order.copy(
+                                                    records = updatedRecs,
+                                                    lastEditor = currentUserName,
+                                                    updatedAt = System.currentTimeMillis()
+                                                )
+                                            );
+                                            val msg = if (newState) "✅ 已標記為「完成訂單」！" else "⏳ 已改回「待處理訂單」";
+                                            Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show();
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (rec.isCompleted) Color(0xFF2E7D32) else Color(0xFFFF9800)
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Check,
+                                            contentDescription = "狀態",
+                                            modifier = Modifier.size(16.dp),
+                                            tint = Color.White
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = if (rec.isCompleted) "已完成訂單" else "待處理 (點此完成)",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    }
+                                }
+
+                                Divider(modifier = Modifier.padding(vertical = 8.dp), color = Color(0xFFE0E0E0))
+
+                                Text(
+                                    text = rec.details,
+                                    fontSize = 16.sp,
+                                    color = if (rec.isCompleted) Color(0xFF4E6E52) else Color(0xFF222222),
+                                    textDecoration = if (rec.isCompleted) TextDecoration.LineThrough else TextDecoration.None,
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        if (showDeleteConfirm) {
+        // 點擊單筆訂貨對話框卡片時，可修改文字或刪除該筆訂單
+        if (editingRecord != null) {
+            val target = editingRecord!!;
+            var editDetails by remember(target.id) { mutableStateOf(target.details) };
+
             AlertDialog(
-                onDismissRequest = { showDeleteConfirm = false },
-                title = { Text("確認刪除訂貨紀錄？") },
-                text = { Text("確定要刪除「${order.customerName} (#${order.customerNumber})」的訂貨紀錄嗎？") },
+                onDismissRequest = { editingRecord = null },
+                title = { Text("編輯此筆訂貨詳細資料", fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val tStr = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault()).format(Date(target.timestamp));
+                        Text("建立時間：$tStr", fontSize = 12.sp, color = Color.Gray)
+                        OutlinedTextField(
+                            value = editDetails,
+                            onValueChange = { editDetails = it },
+                            label = { Text("詳細資料內容") },
+                            modifier = Modifier.fillMaxWidth().height(150.dp),
+                            maxLines = 8
+                        )
+                    }
+                },
                 confirmButton = {
                     Button(
                         onClick = {
-                            showDeleteConfirm = false;
-                            onDelete(order.id);
+                            val updatedRecs = order.records.map {
+                                if (it.id == target.id) it.copy(details = editDetails.trim()) else it
+                            };
+                            onUpdateOrder(
+                                order.copy(
+                                    records = updatedRecs,
+                                    lastEditor = currentUserName,
+                                    updatedAt = System.currentTimeMillis()
+                                )
+                            );
+                            editingRecord = null;
+                            Toast.makeText(ctx, "✅ 已更新此筆訂貨內容", Toast.LENGTH_SHORT).show();
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00796B))
+                    ) { Text("儲存修改") }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(
+                            onClick = {
+                                val updatedRecs = order.records.filterNot { it.id == target.id };
+                                onUpdateOrder(
+                                    order.copy(
+                                        records = updatedRecs,
+                                        lastEditor = currentUserName,
+                                        updatedAt = System.currentTimeMillis()
+                                    )
+                                );
+                                editingRecord = null;
+                                Toast.makeText(ctx, "🗑️ 已刪除此筆訂貨紀錄", Toast.LENGTH_SHORT).show();
+                            }
+                        ) { Text("刪除此筆訂單", color = Color(0xFFD32F2F)) }
+                        TextButton(onClick = { editingRecord = null }) { Text("取消") }
+                    }
+                }
+            )
+        }
+
+        if (showDeleteCustomerConfirm) {
+            AlertDialog(
+                onDismissRequest = { showDeleteCustomerConfirm = false },
+                title = { Text("確認刪除整位客戶？") },
+                text = { Text("確定要刪除「${order.customerName} (#${order.customerNumber})」以及他名下所有的歷史訂貨紀錄嗎？") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showDeleteCustomerConfirm = false;
+                            onDeleteCustomer(order.id);
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))
                     ) { Text("確定刪除") }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showDeleteConfirm = false }) { Text("取消") }
+                    TextButton(onClick = { showDeleteCustomerConfirm = false }) { Text("取消") }
                 }
             )
         }
