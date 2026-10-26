@@ -13,11 +13,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -37,6 +40,7 @@ import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
 
+// 1. 陌生開發名單資料結構
 data class Prospect(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
@@ -46,9 +50,23 @@ data class Prospect(
     val updatedAt: Long = System.currentTimeMillis()
 )
 
+// 2. 客戶訂貨需求資料結構
+data class CustomerOrder(
+    val id: String = UUID.randomUUID().toString(),
+    val customerName: String,
+    val customerNumber: String,
+    val category: String,
+    val details: String = "",
+    val lastEditor: String = "我",
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+val PRODUCT_CATEGORIES = listOf("紐崔萊", "雅姿", "家用科技", "家潔產品", "其它");
+
 object StorageAndCloudManager {
     private const val PREF = "prospect_tracker_prefs";
     private const val KEY_LIST = "prospects_json";
+    private const val KEY_ORDERS = "orders_json";
     private const val KEY_CLOUD_URL = "cloud_db_url";
     private const val KEY_USER_NAME = "user_nickname";
 
@@ -68,6 +86,7 @@ object StorageAndCloudManager {
         return ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).getString(KEY_USER_NAME, "業務A") ?: "業務A";
     }
 
+    // --- 陌生開發本地存取 ---
     fun saveLocal(ctx: Context, list: List<Prospect>) {
         val arr = JSONArray();
         for (p in list) {
@@ -88,6 +107,28 @@ object StorageAndCloudManager {
         return parseJsonToList(s);
     }
 
+    // --- 客戶訂貨本地存取 ---
+    fun saveOrdersLocal(ctx: Context, list: List<CustomerOrder>) {
+        val arr = JSONArray();
+        for (item in list) {
+            val o = JSONObject();
+            o.put("id", item.id);
+            o.put("customerName", item.customerName);
+            o.put("customerNumber", item.customerNumber);
+            o.put("category", item.category);
+            o.put("details", item.details);
+            o.put("lastEditor", item.lastEditor);
+            o.put("updatedAt", item.updatedAt);
+            arr.put(o);
+        }
+        ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(KEY_ORDERS, arr.toString()).apply();
+    }
+
+    fun loadOrdersLocal(ctx: Context): List<CustomerOrder> {
+        val s = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).getString(KEY_ORDERS, null) ?: return emptyList();
+        return parseOrdersJsonToList(s);
+    }
+
     fun parseJsonToList(jsonStr: String): List<Prospect> {
         val res = mutableListOf<Prospect>();
         try {
@@ -95,26 +136,19 @@ object StorageAndCloudManager {
             if (trimmed.startsWith("[")) {
                 val arr = JSONArray(trimmed);
                 for (i in 0 until arr.length()) {
-                    if (!arr.isNull(i)) {
-                        val o = arr.getJSONObject(i);
-                        res.add(parseObj(o));
-                    }
+                    if (!arr.isNull(i)) res.add(parseProspectObj(arr.getJSONObject(i)));
                 }
             } else if (trimmed.startsWith("{")) {
                 val root = JSONObject(trimmed);
                 if (root.has("prospects")) {
                     val arr = root.getJSONArray("prospects");
-                    for (i in 0 until arr.length()) {
-                        res.add(parseObj(arr.getJSONObject(i)));
-                    }
+                    for (i in 0 until arr.length()) res.add(parseProspectObj(arr.getJSONObject(i)));
                 } else {
                     val keys = root.keys();
                     while (keys.hasNext()) {
                         val k = keys.next();
                         val o = root.optJSONObject(k);
-                        if (o != null && o.has("name")) {
-                            res.add(parseObj(o));
-                        }
+                        if (o != null && o.has("name")) res.add(parseProspectObj(o));
                     }
                 }
             }
@@ -122,7 +156,7 @@ object StorageAndCloudManager {
         return res.sortedByDescending { it.updatedAt };
     }
 
-    private fun parseObj(o: JSONObject): Prospect {
+    private fun parseProspectObj(o: JSONObject): Prospect {
         return Prospect(
             id = o.optString("id", UUID.randomUUID().toString()),
             name = o.optString("name", "未命名"),
@@ -133,10 +167,50 @@ object StorageAndCloudManager {
         );
     }
 
-    fun createBackupJson(list: List<Prospect>): String {
+    fun parseOrdersJsonToList(jsonStr: String): List<CustomerOrder> {
+        val res = mutableListOf<CustomerOrder>();
+        try {
+            val trimmed = jsonStr.trim();
+            if (trimmed.startsWith("[")) {
+                val arr = JSONArray(trimmed);
+                for (i in 0 until arr.length()) {
+                    if (!arr.isNull(i)) res.add(parseOrderObj(arr.getJSONObject(i)));
+                }
+            } else if (trimmed.startsWith("{")) {
+                val root = JSONObject(trimmed);
+                if (root.has("orders")) {
+                    val arr = root.getJSONArray("orders");
+                    for (i in 0 until arr.length()) res.add(parseOrderObj(arr.getJSONObject(i)));
+                } else {
+                    val keys = root.keys();
+                    while (keys.hasNext()) {
+                        val k = keys.next();
+                        val o = root.optJSONObject(k);
+                        if (o != null && o.has("customerName")) res.add(parseOrderObj(o));
+                    }
+                }
+            }
+        } catch (e: Exception) { e.printStackTrace(); }
+        return res.sortedByDescending { it.updatedAt };
+    }
+
+    private fun parseOrderObj(o: JSONObject): CustomerOrder {
+        return CustomerOrder(
+            id = o.optString("id", UUID.randomUUID().toString()),
+            customerName = o.optString("customerName", "未命名"),
+            customerNumber = o.optString("customerNumber", "無編號"),
+            category = o.optString("category", "紐崔萊"),
+            details = o.optString("details", ""),
+            lastEditor = o.optString("lastEditor", "夥伴"),
+            updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
+        );
+    }
+
+    // 打包完整備份檔 (同時包含陌生開發與客戶訂貨)
+    fun createBackupJson(prospects: List<Prospect>, orders: List<CustomerOrder>): String {
         val root = JSONObject();
-        val arr = JSONArray();
-        for (p in list) {
+        val pArr = JSONArray();
+        for (p in prospects) {
             val o = JSONObject();
             o.put("id", p.id);
             o.put("name", p.name);
@@ -144,13 +218,27 @@ object StorageAndCloudManager {
             o.put("chatNotes", p.chatNotes);
             o.put("lastEditor", p.lastEditor);
             o.put("updatedAt", p.updatedAt);
-            arr.put(o);
+            pArr.put(o);
+        }
+        val oArr = JSONArray();
+        for (item in orders) {
+            val o = JSONObject();
+            o.put("id", item.id);
+            o.put("customerName", item.customerName);
+            o.put("customerNumber", item.customerNumber);
+            o.put("category", item.category);
+            o.put("details", item.details);
+            o.put("lastEditor", item.lastEditor);
+            o.put("updatedAt", item.updatedAt);
+            oArr.put(o);
         }
         root.put("backupTime", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date()));
-        root.put("prospects", arr);
+        root.put("prospects", pArr);
+        root.put("orders", oArr);
         return root.toString(2);
     }
 
+    // --- 陌生開發 Firebase 雲端同步 ---
     suspend fun pushItemToCloud(baseUrl: String, item: Prospect): Boolean = withContext(Dispatchers.IO) {
         if (baseUrl.isBlank()) return@withContext false;
         try {
@@ -174,10 +262,7 @@ object StorageAndCloudManager {
             val code = conn.responseCode;
             conn.disconnect();
             code in 200..299
-        } catch (e: Exception) {
-            e.printStackTrace();
-            false
-        }
+        } catch (e: Exception) { false }
     }
 
     suspend fun deleteItemFromCloud(baseUrl: String, id: String): Boolean = withContext(Dispatchers.IO) {
@@ -191,9 +276,7 @@ object StorageAndCloudManager {
             val code = conn.responseCode;
             conn.disconnect();
             code in 200..299
-        } catch (e: Exception) {
-            false
-        }
+        } catch (e: Exception) { false }
     }
 
     suspend fun fetchAllFromCloud(baseUrl: String): List<Prospect>? = withContext(Dispatchers.IO) {
@@ -213,9 +296,69 @@ object StorageAndCloudManager {
                 conn.disconnect();
                 null
             }
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
+    }
+
+    // --- 客戶訂貨 Firebase 雲端同步 ---
+    suspend fun pushOrderToCloud(baseUrl: String, item: CustomerOrder): Boolean = withContext(Dispatchers.IO) {
+        if (baseUrl.isBlank()) return@withContext false;
+        try {
+            val endpoint = "$baseUrl/orders/${item.id}.json";
+            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "PUT";
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                doOutput = true;
+                connectTimeout = 5000;
+                readTimeout = 5000;
+            };
+            val o = JSONObject().apply {
+                put("id", item.id);
+                put("customerName", item.customerName);
+                put("customerNumber", item.customerNumber);
+                put("category", item.category);
+                put("details", item.details);
+                put("lastEditor", item.lastEditor);
+                put("updatedAt", item.updatedAt);
+            };
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(o.toString()); };
+            val code = conn.responseCode;
+            conn.disconnect();
+            code in 200..299
+        } catch (e: Exception) { false }
+    }
+
+    suspend fun deleteOrderFromCloud(baseUrl: String, id: String): Boolean = withContext(Dispatchers.IO) {
+        if (baseUrl.isBlank()) return@withContext false;
+        try {
+            val endpoint = "$baseUrl/orders/$id.json";
+            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "DELETE";
+                connectTimeout = 5000;
+            };
+            val code = conn.responseCode;
+            conn.disconnect();
+            code in 200..299
+        } catch (e: Exception) { false }
+    }
+
+    suspend fun fetchAllOrdersFromCloud(baseUrl: String): List<CustomerOrder>? = withContext(Dispatchers.IO) {
+        if (baseUrl.isBlank()) return@withContext null;
+        try {
+            val endpoint = "$baseUrl/orders.json";
+            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET";
+                connectTimeout = 5000;
+                readTimeout = 5000;
+            };
+            if (conn.responseCode in 200..299) {
+                val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() };
+                conn.disconnect();
+                if (text == "null" || text.isBlank()) emptyList() else parseOrdersJsonToList(text)
+            } else {
+                conn.disconnect();
+                null
+            }
+        } catch (e: Exception) { null }
     }
 }
 
@@ -224,7 +367,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState);
         setContent {
             MaterialTheme {
-                ProspectTrackerApp()
+                MainAppEntry()
             }
         }
     }
@@ -232,10 +375,11 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ProspectTrackerApp() {
+fun MainAppEntry() {
     val ctx = LocalContext.current;
     val scope = rememberCoroutineScope();
 
+    // 載入陌生開發名單
     val prospects = remember {
         val saved = StorageAndCloudManager.loadLocal(ctx);
         if (saved.isNotEmpty()) mutableStateListOf(*saved.toTypedArray())
@@ -249,28 +393,57 @@ fun ProspectTrackerApp() {
         )
     };
 
+    // 載入客戶訂貨名單
+    val orders = remember {
+        val saved = StorageAndCloudManager.loadOrdersLocal(ctx);
+        if (saved.isNotEmpty()) mutableStateListOf(*saved.toTypedArray())
+        else mutableStateListOf(
+            CustomerOrder(
+                customerName = "陳小姐 (範例訂貨)",
+                customerNumber = "A123456",
+                category = "紐崔萊",
+                details = "雙X 2盒、優質蛋白素 1罐，下週三面交。",
+                lastEditor = "業務A"
+            )
+        )
+    };
+
+    // 頁面狀態："home" (首頁選擇), "prospects" (陌生開發), "orders" (客戶訂貨)
+    var currentSection by remember { mutableStateOf("home") };
     var selectedProspectId by remember { mutableStateOf<String?>(null) };
-    var showAddDialog by remember { mutableStateOf(false) };
+    var selectedOrderId by remember { mutableStateOf<String?>(null) };
+
+    var showAddProspectDialog by remember { mutableStateOf(false) };
+    var showAddOrderDialog by remember { mutableStateOf(false) };
     var showCloudDialog by remember { mutableStateOf(false) };
+
     var cloudUrl by remember { mutableStateOf(StorageAndCloudManager.getCloudUrl(ctx)) };
     var userName by remember { mutableStateOf(StorageAndCloudManager.getUserName(ctx)) };
     var syncStatus by remember { mutableStateOf("本地儲存模式") };
 
-    // 定時每 4 秒自動與多人雲端資料庫同步
+    // 每 4 秒自動與雲端同步「陌生開發」與「客戶訂貨」
     LaunchedEffect(cloudUrl) {
         while (isActive) {
             if (cloudUrl.isNotBlank()) {
-                val remoteList = StorageAndCloudManager.fetchAllFromCloud(cloudUrl);
-                if (remoteList != null) {
+                val remoteProspects = StorageAndCloudManager.fetchAllFromCloud(cloudUrl);
+                val remoteOrders = StorageAndCloudManager.fetchAllOrdersFromCloud(cloudUrl);
+
+                if (remoteProspects != null && remoteOrders != null) {
                     syncStatus = "🟢 多人雲端即時同步中";
-                    if (remoteList.isEmpty() && prospects.isNotEmpty()) {
-                        for (p in prospects) {
-                            StorageAndCloudManager.pushItemToCloud(cloudUrl, p);
-                        }
+                    if (remoteProspects.isEmpty() && prospects.isNotEmpty()) {
+                        for (p in prospects) StorageAndCloudManager.pushItemToCloud(cloudUrl, p);
                     } else {
                         prospects.clear();
-                        prospects.addAll(remoteList);
+                        prospects.addAll(remoteProspects);
                         StorageAndCloudManager.saveLocal(ctx, prospects);
+                    }
+
+                    if (remoteOrders.isEmpty() && orders.isNotEmpty()) {
+                        for (o in orders) StorageAndCloudManager.pushOrderToCloud(cloudUrl, o);
+                    } else {
+                        orders.clear();
+                        orders.addAll(remoteOrders);
+                        StorageAndCloudManager.saveOrdersLocal(ctx, orders);
                     }
                 } else {
                     syncStatus = "⚠️ 雲端連線失敗 (已存於本地)";
@@ -282,48 +455,58 @@ fun ProspectTrackerApp() {
         }
     }
 
+    // 匯出 JSON 備份檔至 Google Drive
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
             try {
-                val json = StorageAndCloudManager.createBackupJson(prospects);
+                val json = StorageAndCloudManager.createBackupJson(prospects, orders);
                 ctx.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray(Charsets.UTF_8)); };
-                Toast.makeText(ctx, "☁️ 完整名單已成功備份至雲端硬碟！", Toast.LENGTH_LONG).show();
+                Toast.makeText(ctx, "☁️ 陌生開發與客戶訂貨已完整備份至雲端硬碟！", Toast.LENGTH_LONG).show();
             } catch (e: Exception) {
                 Toast.makeText(ctx, "備份失敗：${e.message}", Toast.LENGTH_LONG).show();
             }
         }
     };
 
+    // 從 Google Drive 讀取 JSON 備份檔還原
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             try {
                 val content = ctx.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "";
-                val restored = StorageAndCloudManager.parseJsonToList(content);
-                if (restored.isNotEmpty()) {
+                val restoredProspects = StorageAndCloudManager.parseJsonToList(content);
+                val restoredOrders = StorageAndCloudManager.parseOrdersJsonToList(content);
+
+                if (restoredProspects.isNotEmpty()) {
                     prospects.clear();
-                    prospects.addAll(restored);
+                    prospects.addAll(restoredProspects);
                     StorageAndCloudManager.saveLocal(ctx, prospects);
                     if (cloudUrl.isNotBlank()) {
-                        scope.launch {
-                            for (p in restored) StorageAndCloudManager.pushItemToCloud(cloudUrl, p);
-                        }
+                        scope.launch { for (p in restoredProspects) StorageAndCloudManager.pushItemToCloud(cloudUrl, p); }
                     }
-                    Toast.makeText(ctx, "✅ 成功還原 ${restored.size} 筆名單！", Toast.LENGTH_LONG).show();
-                } else {
-                    Toast.makeText(ctx, "檔案內沒有有效的名單資料", Toast.LENGTH_LONG).show();
                 }
+                if (restoredOrders.isNotEmpty()) {
+                    orders.clear();
+                    orders.addAll(restoredOrders);
+                    StorageAndCloudManager.saveOrdersLocal(ctx, orders);
+                    if (cloudUrl.isNotBlank()) {
+                        scope.launch { for (o in restoredOrders) StorageAndCloudManager.pushOrderToCloud(cloudUrl, o); }
+                    }
+                }
+                Toast.makeText(ctx, "✅ 成功還原：${restoredProspects.size} 筆開發名單、${restoredOrders.size} 筆訂貨紀錄！", Toast.LENGTH_LONG).show();
             } catch (e: Exception) {
                 Toast.makeText(ctx, "讀取失敗：${e.message}", Toast.LENGTH_LONG).show();
             }
         }
     };
 
-    val currentSelected = prospects.find { it.id == selectedProspectId };
+    val currentProspect = prospects.find { it.id == selectedProspectId };
+    val currentOrder = orders.find { it.id == selectedOrderId };
 
-    if (currentSelected != null) {
+    // 畫面導覽判斷
+    if (currentProspect != null) {
         BackHandler { selectedProspectId = null; }
         ProspectDetailScreen(
-            prospect = currentSelected,
+            prospect = currentProspect,
             currentUserName = userName,
             onBack = { selectedProspectId = null; },
             onSave = { updated ->
@@ -345,331 +528,46 @@ fun ProspectTrackerApp() {
                 }
             }
         );
-    } else {
+    } else if (currentOrder != null) {
+        BackHandler { selectedOrderId = null; }
+        OrderDetailScreen(
+            order = currentOrder,
+            currentUserName = userName,
+            onBack = { selectedOrderId = null; },
+            onSave = { updated ->
+                val idx = orders.indexOfFirst { it.id == updated.id };
+                if (idx >= 0) orders[idx] = updated else orders.add(0, updated);
+                orders.sortByDescending { it.updatedAt };
+                StorageAndCloudManager.saveOrdersLocal(ctx, orders);
+                if (cloudUrl.isNotBlank()) {
+                    scope.launch { StorageAndCloudManager.pushOrderToCloud(cloudUrl, updated); }
+                }
+                Toast.makeText(ctx, "✅ 訂貨資料已儲存並同步", Toast.LENGTH_SHORT).show();
+            },
+            onDelete = { id ->
+                orders.removeAll { it.id == id };
+                StorageAndCloudManager.saveOrdersLocal(ctx, orders);
+                selectedOrderId = null;
+                if (cloudUrl.isNotBlank()) {
+                    scope.launch { StorageAndCloudManager.deleteOrderFromCloud(cloudUrl, id); }
+                }
+            }
+        );
+    } else if (currentSection == "home") {
+        // 進入 Application 後的首頁功能選擇畫面
         Scaffold(
             topBar = {
                 TopAppBar(
                     title = {
                         Column {
-                            Text("陌生開發名單 (${prospects.size})", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Text("業務隨身助理", fontWeight = FontWeight.Bold, fontSize = 19.sp)
                             Text(syncStatus, fontSize = 11.sp, color = Color(0xFFD0E8FF))
                         }
                     },
                     actions = {
-                        if (cloudUrl.isNotBlank()) {
-                            IconButton(onClick = {
-                                scope.launch {
-                                    val remote = StorageAndCloudManager.fetchAllFromCloud(cloudUrl);
-                                    if (remote != null) {
-                                        prospects.clear();
-                                        prospects.addAll(remote);
-                                        StorageAndCloudManager.saveLocal(ctx, prospects);
-                                        Toast.makeText(ctx, "已同步最新雲端名單", Toast.LENGTH_SHORT).show();
-                                    }
-                                }
-                            }) {
-                                Icon(Icons.Default.Refresh, contentDescription = "同步", tint = Color.White)
-                            }
-                        }
                         TextButton(onClick = { showCloudDialog = true }) {
                             Text("☁️ 雲端與多人", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1E3A5F), titleContentColor = Color.White)
                 )
-            },
-            floatingActionButton = {
-                ExtendedFloatingActionButton(
-                    onClick = { showAddDialog = true },
-                    containerColor = Color(0xFF06C755),
-                    contentColor = Color.White
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "新增")
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("新增開發對象", fontWeight = FontWeight.Bold)
-                }
-            }
-        ) { innerPadding ->
-            if (prospects.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize().padding(innerPadding), contentAlignment = Alignment.Center) {
-                    Text("目前尚無名單，請點右下角「＋新增開發對象」", color = Color.Gray, fontSize = 15.sp)
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize().background(Color(0xFFF4F6F9)).padding(innerPadding).padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(prospects, key = { it.id }) { item ->
-                        Card(
-                            modifier = Modifier.fillMaxWidth().clickable { selectedProspectId = item.id },
-                            shape = RoundedCornerShape(12.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color.White),
-                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-                        ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                    Text(item.name, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1E3A5F))
-                                    val timeStr = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(item.updatedAt));
-                                    Text("更新：$timeStr (${item.lastEditor})", fontSize = 11.sp, color = Color.Gray)
-                                }
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Text("📍 地點：${item.location}", fontSize = 14.sp, color = Color(0xFF333333), fontWeight = FontWeight.Medium)
-                                if (item.chatNotes.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    val preview = item.chatNotes.lines().lastOrNull { it.isNotBlank() } ?: "";
-                                    Text("💬 最新紀錄：$preview", fontSize = 13.sp, color = Color(0xFF666666), maxLines = 1)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (showAddDialog) {
-                var newName by remember { mutableStateOf("") };
-                var newLoc by remember { mutableStateOf("") };
-                var newNote by remember { mutableStateOf("") };
-
-                AlertDialog(
-                    onDismissRequest = { showAddDialog = false },
-                    title = { Text("新增陌生開發對象", fontWeight = FontWeight.Bold) },
-                    text = {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            OutlinedTextField(value = newName, onValueChange = { newName = it }, label = { Text("對象名稱 (必填)") }, singleLine = true)
-                            OutlinedTextField(value = newLoc, onValueChange = { newLoc = it }, label = { Text("認識地點 (如：信義區星巴克)") }, singleLine = true)
-                            OutlinedTextField(value = newNote, onValueChange = { newNote = it }, label = { Text("初步聊天內容 (選填)") }, maxLines = 3)
-                        }
-                    },
-                    confirmButton = {
-                        Button(
-                            onClick = {
-                                if (newName.isNotBlank()) {
-                                    val timeTag = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date());
-                                    val initChat = if (newNote.isNotBlank()) "[$timeTag $userName] ${newNote.trim()}" else "";
-                                    val created = Prospect(
-                                        name = newName.trim(),
-                                        location = newLoc.trim().ifEmpty { "未填寫地點" },
-                                        chatNotes = initChat,
-                                        lastEditor = userName
-                                    );
-                                    prospects.add(0, created);
-                                    StorageAndCloudManager.saveLocal(ctx, prospects);
-                                    if (cloudUrl.isNotBlank()) {
-                                        scope.launch { StorageAndCloudManager.pushItemToCloud(cloudUrl, created); }
-                                    }
-                                    showAddDialog = false;
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06C755))
-                        ) { Text("新增並備份") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showAddDialog = false }) { Text("取消") }
-                    }
-                )
-            }
-
-            if (showCloudDialog) {
-                var inputUrl by remember { mutableStateOf(cloudUrl) };
-                var inputNick by remember { mutableStateOf(userName) };
-
-                AlertDialog(
-                    onDismissRequest = { showCloudDialog = false },
-                    title = { Text("☁️ 雲端備份 & 多人協作設定", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
-                    text = {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Text("【功能 1：多人即時共同編輯】\n貼上 Firebase Realtime Database 網址（團隊成員貼上相同網址即可即時同步所有名單與對話）：", fontSize = 13.sp, color = Color.DarkGray)
-                            OutlinedTextField(
-                                value = inputNick,
-                                onValueChange = { inputNick = it },
-                                label = { Text("您的顯示名稱 (如：業務A)") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            OutlinedTextField(
-                                value = inputUrl,
-                                onValueChange = { inputUrl = it },
-                                label = { Text("雲端資料庫網址 (https://xxx.firebaseio.com)") },
-                                placeholder = { Text("留空則僅使用手機本地儲存") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Button(
-                                onClick = {
-                                    StorageAndCloudManager.setCloudConfig(ctx, inputUrl, inputNick);
-                                    cloudUrl = StorageAndCloudManager.getCloudUrl(ctx);
-                                    userName = StorageAndCloudManager.getUserName(ctx);
-                                    showCloudDialog = false;
-                                    Toast.makeText(ctx, "已更新設定！", Toast.LENGTH_SHORT).show();
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E3A5F))
-                            ) { Text("💾 儲存多人連線設定") }
-
-                            Divider(modifier = Modifier.padding(vertical = 4.dp))
-                            Text("【功能 2：Google 雲端硬碟檔案備份】", fontSize = 13.sp, color = Color.DarkGray)
-                            Button(
-                                onClick = {
-                                    showCloudDialog = false;
-                                    val dateTag = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date());
-                                    exportLauncher.launch("陌生開發名單備份_$dateTag.json");
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2))
-                            ) { Text("☁️ 匯出完整名單 (.json) 至 Google 雲端") }
-
-                            OutlinedButton(
-                                onClick = {
-                                    showCloudDialog = false;
-                                    importLauncher.launch(arrayOf("application/json", "*/*"));
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            ) { Text("📥 從 Google 雲端硬碟讀取備份檔還原") }
-                        }
-                    },
-                    confirmButton = {},
-                    dismissButton = {
-                        TextButton(onClick = { showCloudDialog = false }) { Text("關閉") }
-                    }
-                )
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ProspectDetailScreen(
-    prospect: Prospect,
-    currentUserName: String,
-    onBack: () -> Unit,
-    onSave: (Prospect) -> Unit,
-    onDelete: (String) -> Unit
-) {
-    var name by remember(prospect.id) { mutableStateOf(prospect.name) };
-    var location by remember(prospect.id) { mutableStateOf(prospect.location) };
-    var chatNotes by remember(prospect.id, prospect.updatedAt) { mutableStateOf(prospect.chatNotes) };
-    var quickChatInput by remember { mutableStateOf("") };
-    var showDeleteConfirm by remember { mutableStateOf(false) };
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("對象詳細內容", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = Color.White)
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { showDeleteConfirm = true }) {
-                        Icon(Icons.Default.Delete, contentDescription = "刪除", tint = Color(0xFFFFB4AB))
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1E3A5F), titleContentColor = Color.White)
-            )
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("對象名稱") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-
-            OutlinedTextField(
-                value = location,
-                onValueChange = { location = it },
-                label = { Text("認識地點") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-
-            // 快速新增一筆帶時間與發言人名稱的聊天記錄
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = quickChatInput,
-                    onValueChange = { quickChatInput = it },
-                    label = { Text("新增一句聊天紀錄 (以 $currentUserName 身分發言)") },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(
-                    onClick = {
-                        if (quickChatInput.isNotBlank()) {
-                            val timeTag = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date());
-                            val newLine = "[$timeTag $currentUserName] ${quickChatInput.trim()}";
-                            chatNotes = if (chatNotes.isBlank()) newLine else "$chatNotes\n$newLine";
-                            quickChatInput = "";
-                            val updated = prospect.copy(
-                                name = name.trim(),
-                                location = location.trim(),
-                                chatNotes = chatNotes,
-                                lastEditor = currentUserName,
-                                updatedAt = System.currentTimeMillis()
-                            );
-                            onSave(updated);
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06C755))
-                ) { Text("紀錄") }
-            }
-
-            OutlinedTextField(
-                value = chatNotes,
-                onValueChange = { chatNotes = it },
-                label = { Text("完整聊天內容 / 開發筆記 (可自由編輯)") },
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                maxLines = Int.MAX_VALUE
-            )
-
-            Button(
-                onClick = {
-                    val updated = prospect.copy(
-                        name = name.trim().ifEmpty { "未命名" },
-                        location = location.trim().ifEmpty { "未填寫地點" },
-                        chatNotes = chatNotes,
-                        lastEditor = currentUserName,
-                        updatedAt = System.currentTimeMillis()
-                    );
-                    onSave(updated);
-                    onBack();
-                },
-                modifier = Modifier.fillMaxWidth().height(50.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E3A5F))
-            ) {
-                Text("💾 儲存修改並同步至雲端", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-
-        if (showDeleteConfirm) {
-            AlertDialog(
-                onDismissRequest = { showDeleteConfirm = false },
-                title = { Text("確認刪除名單？") },
-                text = { Text("確定要刪除「${prospect.name}」的所有資料與聊天紀錄嗎？") },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            showDeleteConfirm = false;
-                            onDelete(prospect.id);
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))
-                    ) { Text("確定刪除") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showDeleteConfirm = false }) { Text("取消") }
-                }
-            )
-        }
-    }
-}
