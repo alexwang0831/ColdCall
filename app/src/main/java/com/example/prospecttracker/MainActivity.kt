@@ -182,6 +182,7 @@ object LocalStorage {
         return res;
     }
 
+    // 打包備份 JSON
     fun createBackupJson(ctx: Context): String {
         val p = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE);
         val root = JSONObject();
@@ -196,6 +197,7 @@ object LocalStorage {
         return root.toString(2);
     }
 
+    // 從備份還原
     fun restoreFromBackupJson(ctx: Context, jsonStr: String): Boolean {
         return try {
             val root = JSONObject(jsonStr);
@@ -219,6 +221,7 @@ object LocalStorage {
         }
     }
 
+    // 匯出 CSV
     fun createCsvContent(expenses: List<ExpenseItem>): String {
         val sb = StringBuilder("\uFEFF日期時間,類別,項目名稱,金額\n");
         val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault());
@@ -238,7 +241,7 @@ object ExpenseParser {
         "日常與居家" to listOf("超市", "全聯", "日用品", "衛生紙", "水費", "電費", "瓦斯", "網路", "電話費", "房租", "管理費", "洗髮精", "清潔"),
         "休閒與嗜好" to listOf("電影", "遊戲", "書", "訂閱", "門票", "展覽", "植物", "飼料", "器材", "玩具", "購物")
     );
-    private val regex = Regex("""([^\d\s,，、；;]+)\s*(\d+)\s*元?""");
+    private val regex = Regex("""([^\d\s,，.,；;]+)\s*(\d+)\s*元?""");
 
     fun parseInput(input: String): List<ExpenseItem> {
         val res = mutableListOf<ExpenseItem>();
@@ -289,12 +292,13 @@ fun ChatLedgerScreen() {
     val listState = rememberLazyListState();
     val scope = rememberCoroutineScope();
 
+    // 系統雲端備份 (.json) 檔案建立器
     val exportJsonLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
             try {
                 val jsonStr = LocalStorage.createBackupJson(ctx);
                 ctx.contentResolver.openOutputStream(uri)?.use { it.write(jsonStr.toByteArray(Charsets.UTF_8)) };
-                messages.add(ChatMessage(text = "☁️ 備份成功！已將完整帳目與對話紀錄存至您的雲端硬碟。", isUser = false));
+                messages.add(ChatMessage(text = "☁️ 雲端備份成功！已安全存至您的 Google 雲端硬碟。", isUser = false));
                 LocalStorage.saveMessages(ctx, messages);
                 scope.launch { listState.animateScrollToItem(messages.size - 1); }
             } catch (e: Exception) {
@@ -303,12 +307,13 @@ fun ChatLedgerScreen() {
         }
     };
 
+    // 系統報表 (.csv) 檔案建立器
     val exportCsvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
         if (uri != null) {
             try {
                 val csvStr = LocalStorage.createCsvContent(expenses);
                 ctx.contentResolver.openOutputStream(uri)?.use { it.write(csvStr.toByteArray(Charsets.UTF_8)) };
-                messages.add(ChatMessage(text = "📊 匯出 CSV 成功！您可以在 Google 試算表打開查看。", isUser = false));
+                messages.add(ChatMessage(text = "📊 匯出試算表成功！您可在 Google 試算表中開啟查看。", isUser = false));
                 LocalStorage.saveMessages(ctx, messages);
                 scope.launch { listState.animateScrollToItem(messages.size - 1); }
             } catch (e: Exception) {
@@ -317,6 +322,7 @@ fun ChatLedgerScreen() {
         }
     };
 
+    // 系統雲端備份檔案讀取還原器
     val importJsonLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             try {
@@ -327,11 +333,11 @@ fun ChatLedgerScreen() {
                     messages.clear();
                     messages.addAll(LocalStorage.loadMessages(ctx));
                     reminderTime = LocalStorage.loadReminderTime(ctx);
-                    messages.add(ChatMessage(text = "✅ 雲端還原成功！已為您恢復共 ${expenses.size} 筆紀錄。", isUser = false));
+                    messages.add(ChatMessage(text = "✅ 雲端還原成功！已恢復共 ${expenses.size} 筆紀錄與對話。", isUser = false));
                     LocalStorage.saveMessages(ctx, messages);
                     scope.launch { listState.animateScrollToItem(messages.size - 1); }
                 } else {
-                    Toast.makeText(ctx, "檔案格式不正確，無法還原！", Toast.LENGTH_LONG).show();
+                    Toast.makeText(ctx, "檔案格式錯誤，無法還原！", Toast.LENGTH_LONG).show();
                 }
             } catch (e: Exception) {
                 Toast.makeText(ctx, "讀取失敗：${e.message}", Toast.LENGTH_LONG).show();
@@ -365,7 +371,7 @@ fun ChatLedgerScreen() {
                     OutlinedTextField(
                         value = inputText,
                         onValueChange = { inputText = it },
-                        placeholder = { Text("早餐20元，或輸入 備份 / 還原") },
+                        placeholder = { Text("早餐20元，或輸入「備份」/「還原」") },
                         modifier = Modifier.weight(1f),
                         singleLine = true,
                         shape = RoundedCornerShape(24.dp),
@@ -378,6 +384,7 @@ fun ChatLedgerScreen() {
                                 val raw = inputText.trim();
                                 inputText = "";
                                 messages.add(ChatMessage(text = raw, isUser = true));
+
                                 val remMatch = Regex("""提醒\s*(\d{1,2})[:：點](\d{1,2})?""").find(raw);
                                 if (raw == "備份" || raw == "雲端備份") {
                                     val dateTag = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date());
@@ -423,7 +430,7 @@ fun ChatLedgerScreen() {
                                         }
                                         messages.add(ChatMessage(text = sb.toString().trim(), isUser = false));
                                     } else {
-                                        messages.add(ChatMessage(text = "⚠️ 請輸入「項目+金額」（如：早餐20元），或輸入「備份」、「提醒 21:00」。", isUser = false));
+                                        messages.add(ChatMessage(text = "⚠️ 請輸入「項目+金額」（如：早餐20元），或輸入「備份」、「還原」。", isUser = false));
                                     }
                                 }
                                 LocalStorage.saveExpenses(ctx, expenses);
@@ -457,13 +464,14 @@ fun ChatLedgerScreen() {
             }
         }
 
+        // Google 雲端硬碟備份 / 還原對話視窗
         if (showCloudDialog) {
             AlertDialog(
                 onDismissRequest = { showCloudDialog = false },
-                title = { Text("☁️ Google 雲端硬碟備份 / 還原", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
+                title = { Text("☁️ Google 雲端硬碟備份與還原", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("請選擇操作項目（跳出系統選單時，點選左上角選單「☰」即可選擇您的 Google 雲端硬碟）：", fontSize = 14.sp, color = Color.DarkGray)
+                        Text("當跳出系統存檔選單時，點選左上角選單「☰」即可選擇您的 **「Google 雲端硬碟」** 進行備份或讀取！", fontSize = 14.sp, color = Color.DarkGray)
                         Button(
                             onClick = {
                                 showCloudDialog = false;
@@ -472,7 +480,7 @@ fun ChatLedgerScreen() {
                             },
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2))
-                        ) { Text("☁️ 匯出完整備份檔 (.json) 至雲端") }
+                        ) { Text("☁️ 匯出完整備份檔 (.json) 至雲端硬碟") }
 
                         Button(
                             onClick = {
@@ -490,7 +498,7 @@ fun ChatLedgerScreen() {
                                 exportCsvLauncher.launch("安麗隨身助理報表_$dateTag.csv");
                             },
                             modifier = Modifier.fillMaxWidth()
-                        ) { Text("📊 匯出 Excel / Google 試算表 (.csv)") }
+                        ) { Text("📊 匯出試算表報表 (.csv) 檢視") }
                     }
                 },
                 confirmButton = {},
