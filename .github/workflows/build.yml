@@ -19,6 +19,15 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Generate Fixed Debug Keystore (For Seamless APK Update)
+        run: |
+          mkdir -p ~/.android
+          rm -f ~/.android/debug.keystore
+          keytool -genkey -v -keystore ~/.android/debug.keystore \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=ProspectTrackerFixedKey,O=Android,C=US"
+
       - name: Download Gradle and Build Debug APK
         run: |
           curl -sL https://services.gradle.org/distributions/gradle-8.5-bin.zip -o gradle.zip
